@@ -1,0 +1,2 @@
+import{b as e}from"./chunk-3IYR5B5J.mjs";import{useEffect as i}from"react";function n({projectId:t,ingestUrl:r}){return i(()=>{e(t,{ingestUrl:r})},[t,r]),null}var p=n;export{n as Attensira,p as default};
+//# sourceMappingURL=react.mjs.map
