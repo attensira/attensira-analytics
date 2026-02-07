@@ -1,2 +1,2 @@
-import{a,b}from"./chunk-3IYR5B5J.mjs";export{a as ATTENSIRA_DEFAULT_INGEST_URL,b as trackPageHit};
+import{a,c as b}from"./chunk-6CHBD5WL.mjs";export{a as AttensiraAnalytics,a as default,b as trackPageHit};
 //# sourceMappingURL=index.mjs.map

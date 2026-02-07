@@ -1,9 +1,6 @@
-import { AttensiraOptions } from './index.cjs';
-
 type AttensiraProps = {
     projectId: string;
-    ingestUrl?: AttensiraOptions['ingestUrl'];
 };
-declare function Attensira({ projectId, ingestUrl }: AttensiraProps): null;
+declare function AttensiraAnalytics({ projectId }: AttensiraProps): null;
 
-export { Attensira, type AttensiraProps, Attensira as default };
+export { AttensiraAnalytics, type AttensiraProps, AttensiraAnalytics as default };

@@ -1,17 +1,16 @@
 import { useEffect } from 'react';
-import { trackPageHit, type AttensiraOptions } from './index';
+import { trackPageHit } from './index';
 
 export type AttensiraProps = {
   projectId: string;
-  ingestUrl?: AttensiraOptions['ingestUrl'];
 };
 
-export function Attensira({ projectId, ingestUrl }: AttensiraProps) {
+export function AttensiraAnalytics({ projectId }: AttensiraProps) {
   useEffect(() => {
-    trackPageHit(projectId, { ingestUrl });
-  }, [projectId, ingestUrl]);
+    trackPageHit(projectId);
+  }, [projectId]);
 
   return null;
 }
 
-export default Attensira;
+export default AttensiraAnalytics;

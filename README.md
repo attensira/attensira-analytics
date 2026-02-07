@@ -10,18 +10,20 @@ npm install @attensira/analytics
 
 ## Usage
 
+### React
+
+```tsx
+import { AttensiraAnalytics } from '@attensira/analytics';
+
+function App() {
+  return <AttensiraAnalytics projectId="YOUR_PROJECT_ID" />;
+}
+```
+
+### Vanilla JS
+
 ```ts
 import { trackPageHit } from '@attensira/analytics';
 
 trackPageHit('YOUR_PROJECT_ID');
-```
-
-### React
-
-```tsx
-import { Attensira } from '@attensira/analytics/react';
-
-function App() {
-  return <Attensira projectId="YOUR_PROJECT_ID" />;
-}
 ```

@@ -1,9 +1,4 @@
-export const ATTENSIRA_DEFAULT_INGEST_URL =
-  'https://ingest.attensira.com/v1/crawler-logs';
-
-export type AttensiraOptions = {
-  ingestUrl?: string;
-};
+const INGEST_URL = 'https://ingest.attensira.com/v1/crawler-logs';
 
 const sent = new Set<string>();
 
@@ -12,26 +7,15 @@ const sent = new Set<string>();
  * Attensira ingest API. Safe to call multiple times; duplicate calls
  * for the same projectId + href are ignored.
  */
-export function trackPageHit(
-  projectId: string,
-  options: AttensiraOptions = {}
-): Promise<void> {
-  if (!projectId || typeof projectId !== 'string') {
-    return Promise.reject(new Error('projectId is required'));
-  }
-
-  if (typeof window === 'undefined') {
-    return Promise.resolve();
-  }
+export function trackPageHit(projectId: string): void {
+  if (!projectId || typeof window === 'undefined') return;
 
   const href = window.location.href;
   const dedupeKey = `${projectId}:${href}`;
-  if (sent.has(dedupeKey)) {
-    return Promise.resolve();
-  }
+  if (sent.has(dedupeKey)) return;
   sent.add(dedupeKey);
 
-  const payload = {
+  const payload = JSON.stringify({
     project_id: projectId,
     action: 'page_hit',
     payload: {
@@ -41,14 +25,10 @@ export function trackPageHit(
       locale: navigator.language || '',
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
     },
-  };
+  });
 
-  const url = options.ingestUrl || ATTENSIRA_DEFAULT_INGEST_URL;
-
-  return fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    keepalive: true,
-  }).then(() => undefined);
+  navigator.sendBeacon(INGEST_URL, new Blob([payload], { type: 'application/json' }));
 }
+
+export { AttensiraAnalytics, type AttensiraProps } from './react';
+export { AttensiraAnalytics as default } from './react';
