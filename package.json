@@ -1,6 +1,6 @@
 {
   "name": "@attensira/analytics",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Simple loader for Attensira analytics client for React/Angular/Vue apps.",
   "license": "MIT",
   "files": [
