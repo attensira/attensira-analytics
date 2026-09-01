@@ -19,7 +19,7 @@
   },
   "sideEffects": false,
   "engines": {
-    "node": ">=20.6.0"
+    "node": ">=22.6.0"
   },
   "scripts": {
     "build": "tsup",
