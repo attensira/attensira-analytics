@@ -3,7 +3,6 @@ import { defineConfig } from 'tsup';
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
-    react: 'src/react.tsx'
   },
   format: ['esm', 'cjs'],
   dts: true,
@@ -11,6 +10,7 @@ export default defineConfig({
   clean: true,
   minify: true,
   target: 'es2019',
+  platform: 'neutral',
   outExtension({ format }) {
     return {
       js: format === 'cjs' ? '.cjs' : '.mjs',
