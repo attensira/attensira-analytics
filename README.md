@@ -49,13 +49,14 @@ browser build, and calling it from code that runs in the browser throws.
 ```ts
 import { createClient } from '@attensira/analytics';
 
-const attensira = createClient({
-  projectId: PROJECT_ID,
-  signingSecret: env.ATTENSIRA_SIGNING_SECRET,
-});
-
 export default {
   async fetch(request, env, ctx) {
+    // Built inside the handler: `env` (the project ID and signing secret)
+    // only exists once Cloudflare invokes fetch(), not at module scope.
+    const attensira = createClient({
+      projectId: env.ATTENSIRA_PROJECT_ID,
+      signingSecret: env.ATTENSIRA_SIGNING_SECRET,
+    });
     const response = await fetch(request);
     // Fire-and-forget: never make a visitor wait on analytics.
     ctx.waitUntil(attensira.trackRequest(request));
@@ -68,7 +69,7 @@ export default {
 
 ```ts
 // middleware.ts
-import { NextResponse } from 'next/server';
+import { NextFetchEvent, NextResponse } from 'next/server';
 import { createClient } from '@attensira/analytics';
 
 const attensira = createClient({
@@ -76,9 +77,11 @@ const attensira = createClient({
   signingSecret: process.env.ATTENSIRA_SIGNING_SECRET!,
 });
 
-export function middleware(request: Request) {
-  // Don't await in the request path; let it run after the response.
-  attensira.trackRequest(request);
+export function middleware(request: Request, event: NextFetchEvent) {
+  // waitUntil, not a bare call: without it the edge runtime can freeze or
+  // recycle the invocation as soon as the response is returned, before the
+  // fire-and-forget request finishes, silently dropping the visit.
+  event.waitUntil(attensira.trackRequest(request));
   return NextResponse.next();
 }
 ```
