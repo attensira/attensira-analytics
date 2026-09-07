@@ -186,7 +186,14 @@ export function publicPageUrl(request: ServerRequest): string {
     // spec, so a proxy fronting `localhost:3000` would otherwise record
     // `https://example.com:3000/...` — a different string from the real URL,
     // splitting one page into two rows.
-    if (!forwardedHost.includes(':')) url.port = '';
+    //
+    // An IPv6 authority is bracketed and full of colons, so "contains a colon"
+    // does not mean "carries a port": `[2001:db8::1]` has none. The port, when
+    // there is one, is what follows the closing bracket.
+    const hasPort = forwardedHost.startsWith('[')
+      ? /\]:\d+$/.test(forwardedHost)
+      : forwardedHost.includes(':');
+    if (!hasPort) url.port = '';
   }
 
   const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim();

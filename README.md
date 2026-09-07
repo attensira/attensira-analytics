@@ -6,10 +6,16 @@ Edge/server client for [Attensira](https://attensira.com)'s AI traffic ingest â€
 ## The whole install
 
 ```ts
-trackPageHit('YOUR_PROJECT_ID', request);
+event.waitUntil(trackPageHit('YOUR_PROJECT_ID', request));
 ```
 
 Your project id is all you need. Nothing else is required to start recording.
+
+Hand the promise to whatever keeps work alive past the response â€”
+`event.waitUntil` in Next.js middleware, `ctx.waitUntil` in a Cloudflare
+Worker. Calling it bare works, but an edge runtime may recycle the invocation
+as soon as the response is returned and cancel the report in flight, which
+looks exactly like no traffic.
 
 ## Breaking change in 1.0.0
 

@@ -138,6 +138,23 @@ test('publicPageUrl prefers the forwarded host over an internal origin', () => {
   assert.equal(publicPageUrl(request), 'https://attensira.com/blog/geo');
 });
 
+test('publicPageUrl clears the internal port for a bracketed IPv6 host', () => {
+  // An IPv6 authority is all colons, so "has a colon" is not "has a port".
+  const request = makeRequest('http://localhost:3000/page', {
+    'x-forwarded-host': '[2001:db8::1]',
+    'x-forwarded-proto': 'https',
+  });
+  assert.equal(publicPageUrl(request), 'https://[2001:db8::1]/page');
+});
+
+test('publicPageUrl keeps an explicit IPv6 port', () => {
+  const request = makeRequest('http://localhost:3000/page', {
+    'x-forwarded-host': '[2001:db8::1]:8443',
+    'x-forwarded-proto': 'https',
+  });
+  assert.equal(publicPageUrl(request), 'https://[2001:db8::1]:8443/page');
+});
+
 test('publicPageUrl keeps the path and query that identify the page', () => {
   assert.equal(
     publicPageUrl(makeRequest('https://attensira.com/blog?page=2')),
