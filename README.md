@@ -1,26 +1,40 @@
 # @attensira/analytics
 
-Signed edge/server client for [Attensira](https://attensira.com)'s AI-crawler
-traffic ingest — `POST /v1/visits` on the Attensira API.
+Edge/server client for [Attensira](https://attensira.com)'s AI traffic ingest —
+`POST /v1/visits`.
+
+## The whole install
+
+```ts
+event.waitUntil(trackPageHit('YOUR_PROJECT_ID', request));
+```
+
+Your project id is all you need. Nothing else is required to start recording.
+
+Hand the promise to whatever keeps work alive past the response —
+`event.waitUntil` in Next.js middleware, `ctx.waitUntil` in a Cloudflare
+Worker. Calling it bare works, but an edge runtime may recycle the invocation
+as soon as the response is returned and cancel the report in flight, which
+looks exactly like no traffic.
 
 ## Breaking change in 1.0.0
 
-Versions before 1.0.0 sent an unsigned `sendBeacon`/`fetch` page-hit to
-`https://ingest.attensira.com/v1/crawler-logs` from browser JavaScript. That
-host and endpoint were never served by Attensira's ingest API — nothing sent
-by a pre-1.0 install was ever recorded, and AI crawlers don't execute
-JavaScript in the first place, so a browser beacon would not have seen them
-even if the endpoint had existed.
+Versions before 1.0.0 sent an unsigned `sendBeacon` from browser JavaScript to
+`https://ingest.attensira.com/v1/crawler-logs`. That route no longer exists —
+it was replaced by `/v1/visits`, which takes a different body — so nothing a
+pre-1.0 install sent was ever recorded.
 
-1.0.0 is a full rewrite against the endpoint that actually exists:
-`POST https://api.attensira.com/v1/visits`, authenticated with an
-[HMAC signature](#how-signing-works) instead of no authentication at all.
-Because that signature is keyed by a per-project secret, **this package is
-now server/edge-only and no longer has a browser entry point** — a secret
-shipped to a browser bundle is a secret anyone viewing page source can read,
-which would defeat the signature. There is no migration path that keeps the
-old browser usage; if you rendered `<AttensiraAnalytics />` or called
-`trackPageHit()` client-side, replace it with the middleware pattern below.
+The browser was the deeper problem. **AI crawlers do not execute JavaScript.**
+GPTBot, ClaudeBot, PerplexityBot and CCBot fetch a page and leave; by the time
+an in-page script runs, the only visitors left are humans with browsers. A
+browser beacon could not have seen a crawler even if the endpoint had existed.
+
+1.0.0 is a rewrite against the endpoint that exists, called from the one layer
+where a crawler request is visible at all: edge middleware, a CDN worker, or
+any server-side runtime with `fetch` and `crypto.subtle`. There is no migration
+that keeps the old browser usage — if you rendered `<AttensiraAnalytics />` or
+called `trackPageHit()` client-side, replace it with the middleware pattern
+below.
 
 ## Install
 
@@ -28,150 +42,126 @@ old browser usage; if you rendered `<AttensiraAnalytics />` or called
 npm install @attensira/analytics
 ```
 
-## Get your credentials
-
-`projectId` and `signingSecret` come from `GET /v1/visits/install`, called
-with your workspace's API key (see the Attensira dashboard). The response's
-`signing_secret` field is the value to use here — it is already derived per
-project; it is **not** your API key, and it is not any root key the webapp
-holds. Keep it server-side, the same as any other credential (an environment
-variable, a secrets store, a Worker secret — never committed, never sent to
-a client).
-
 ## Usage
-
-This package must run somewhere the signing secret can stay a secret: an
-edge worker, server middleware, or a backend route. It does not ship a
-browser build, and calling it from code that runs in the browser throws.
-
-### Cloudflare Worker
-
-```ts
-import { createClient } from '@attensira/analytics';
-
-export default {
-  async fetch(request, env, ctx) {
-    // Built inside the handler: `env` (the project ID and signing secret)
-    // only exists once Cloudflare invokes fetch(), not at module scope.
-    const attensira = createClient({
-      projectId: env.ATTENSIRA_PROJECT_ID,
-      signingSecret: env.ATTENSIRA_SIGNING_SECRET,
-    });
-    const response = await fetch(request);
-    // Fire-and-forget: never make a visitor wait on analytics.
-    ctx.waitUntil(attensira.trackRequest(request));
-    return response;
-  },
-};
-```
 
 ### Next.js middleware
 
 ```ts
 // middleware.ts
-import { NextFetchEvent, NextResponse } from 'next/server';
-import { createClient } from '@attensira/analytics';
+import type { NextFetchEvent, NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
+import { trackPageHit } from '@attensira/analytics';
 
-const attensira = createClient({
-  projectId: process.env.ATTENSIRA_PROJECT_ID!,
-  signingSecret: process.env.ATTENSIRA_SIGNING_SECRET!,
-});
-
-export function middleware(request: Request, event: NextFetchEvent) {
-  // waitUntil, not a bare call: without it the edge runtime can freeze or
-  // recycle the invocation as soon as the response is returned, before the
-  // fire-and-forget request finishes, silently dropping the visit.
-  event.waitUntil(attensira.trackRequest(request));
+export default function middleware(request: NextRequest, event: NextFetchEvent) {
+  // waitUntil, not a bare call: without it the edge runtime may recycle the
+  // invocation as soon as the response is returned, cancelling the report
+  // mid-flight.
+  event.waitUntil(trackPageHit('YOUR_PROJECT_ID', request));
   return NextResponse.next();
+}
+
+export const config = {
+  // Pages, not assets. Every request that reaches this runs.
+  matcher: ['/((?!_next|.*\\.(?:ico|png|svg|jpg|jpeg|webp|css|js)).*)'],
+};
+```
+
+### Cloudflare Worker
+
+```ts
+import { trackPageHit } from '@attensira/analytics';
+
+export default {
+  async fetch(request, env, ctx) {
+    const response = await fetch(request);
+    ctx.waitUntil(trackPageHit(env.ATTENSIRA_PROJECT_ID, request));
+    return response;
+  },
+};
+```
+
+## Scope it to pages
+
+`trackPageHit` skips anything that is not a GET or HEAD, so form posts never
+land in your page breakdown. Paths are yours to scope, because only you know
+which of them are pages: if your middleware also runs for API routes, a
+webhook, or a rewrite that proxies another vendor, exclude those before
+calling — either in the framework's matcher, or with a guard:
+
+```ts
+const path = new URL(request.url).pathname;
+if (!path.startsWith('/api')) {
+  event.waitUntil(trackPageHit('YOUR_PROJECT_ID', request));
 }
 ```
 
-### Any server route
+Otherwise `/api/subscribe` appears in the per-page breakdown beside your real
+pages, which is the number the whole measurement exists to produce.
+
+## Send everything — the service decides what is a bot
+
+Report every request, humans included. Classification happens server-side
+against a bot table Attensira can correct without anyone redeploying an edge
+worker.
+
+Filtering in your own code before sending is the mistake that makes a new
+crawler invisible: whatever your filter has not heard of is exactly the traffic
+you most wanted to find out about. Human hits are classified as such and cost
+you nothing.
+
+## Signing (optional)
+
+A project with no write key provisioned is accepted unsigned — which is why a
+project id alone is a working install. Once a write key *is* provisioned for
+the project, the unsigned path closes: an unsigned body is then treated as a
+forgery rather than an old client, and is refused.
 
 ```ts
-import { createClient } from '@attensira/analytics';
-
-const attensira = createClient({
-  projectId: 'YOUR_PROJECT_ID',
-  signingSecret: process.env.ATTENSIRA_SIGNING_SECRET!,
-});
-
-await attensira.sendVisits({
-  pageUrl: 'https://example.com/blog/post',
-  userAgent: request.headers['user-agent'],
-  referrer: request.headers['referer'],
-  clientIp: request.socket.remoteAddress,
-});
+trackPageHit(projectId, request, { writeKey: process.env.ATTENSIRA_WRITE_KEY });
 ```
 
-`createClient()` called with no arguments reads `ATTENSIRA_PROJECT_ID`,
-`ATTENSIRA_SIGNING_SECRET`, and optionally `ATTENSIRA_INGEST_ENDPOINT` from
-`process.env`, for runtimes where that's available.
+`writeKey` defaults to `ATTENSIRA_WRITE_KEY` where `process.env` exists. It is
+a server-side credential — never ship it to a browser bundle.
+
+The signature is HMAC-SHA256, lowercase hex, over the bytes
+`"<timestamp>.<body>"`, sent as two headers:
+
+```
+x-attensira-timestamp: <unix seconds>
+x-attensira-signature: <hex hmac-sha256>
+```
+
+The timestamp is signed as well as sent, so it cannot be moved forward to
+replay a captured body; ingest rejects a signature whose timestamp is more than
+five minutes from its own clock. `signBody()` is unit-tested against a vector
+produced by running the service's own Go verifier
+(`internal/aitraffic/signature.go`) — not reimplemented from the spec.
+
+## Privacy
+
+The raw client address never leaves your infrastructure. `client_ip_hash` is a
+SHA-256 digest salted with your project id, computed before the request is
+sent, and the service re-hashes it with a salt that rotates daily — so a stored
+value is not a stable identifier either.
 
 ## API
 
-- **`createClient(options?)`** — builds an `AttensiraClient`. `options` is
-  `{ projectId, signingSecret, endpoint?, fetch? }`; omit it to read from
-  `process.env` (see above).
-- **`client.trackRequest(request, extra?)`** — derives a `Visit` from a
-  standard `Request` (page URL, `user-agent`, `referer`, and a best-effort
-  client IP from common proxy headers) and sends it. Never throws — logs and
-  resolves to `undefined` on failure, so a tracking outage never breaks the
-  request it's attached to.
-- **`client.sendVisits(visit | visit[])`** — the lower-level call for when
-  you already have the fields (e.g. server frameworks that don't hand you a
-  `Request`). Up to 500 visits per call; batching beyond that is not chunked
-  automatically. Throws on a network error or non-2xx response.
-- **`getClientIp(headers)`** — best-effort real client IP from
-  `cf-connecting-ip`, `true-client-ip`, `x-real-ip`, or the first hop of
-  `x-forwarded-for`.
-- **`signBody(signingSecret, timestampSeconds, body)`** — the signature
-  primitive itself, exported for advanced use (writing an edge worker in a
-  runtime this package doesn't run in, e.g. a language other than
-  JS/TS — see [How signing works](#how-signing-works)).
+- **`trackPageHit(projectId, request, options?)`** → `Promise<void>`. Reports
+  one page hit. Never throws and never rejects: a tracking failure must not
+  break the request it is attached to. `options` is
+  `{ writeKey?, endpoint?, fetch? }`.
+- **`buildVisitBody(projectId, request)`** → the request body, for callers
+  writing their own transport.
+- **`signBody(writeKey, timestampSeconds, body)`** → the signature primitive,
+  for writing an edge worker in a runtime this package does not run in.
+- **`getClientIp(headers)`** → best-effort client address from
+  `cf-connecting-ip`, `true-client-ip`, `x-real-ip`, or the first
+  `x-forwarded-for` hop.
+- **`hashClientIp(projectId, ip)`** → the `client_ip_hash` digest.
 
-### `Visit`
-
-| Field        | Type     | Notes                                                                                   |
-| ------------ | -------- | ---------------------------------------------------------------------------------------- |
-| `pageUrl`    | `string` | Required.                                                                                 |
-| `userAgent`  | `string` | Optional; used server-side to identify the crawler.                                      |
-| `referrer`   | `string` | Optional.                                                                                 |
-| `clientIp`   | `string` | The crawler's real connecting IP. Used to verify the user-agent's claim by reverse DNS, then hashed and discarded — never stored raw. Omit only if truly unavailable; without it the hit is recorded as unverified. |
-| `timestamp`  | `Date`   | Optional; defaults to now.                                                               |
-
-## How signing works
-
-Every request carries an `X-Attensira-Signature` header:
-
-```
-X-Attensira-Signature: t=<unix seconds>,v1=<hex hmac-sha256>
-```
-
-The signed message is the literal bytes `"<t>.<body>"` (the decimal
-timestamp, a period, then the exact JSON body bytes being sent), HMAC-SHA256
-keyed by your project's signing secret, hex-encoded. The timestamp is
-inside the signed payload — not just alongside it — so it can't be moved
-forward to replay an old batch; the server rejects a signature whose
-timestamp is more than 5 minutes from its own clock.
-
-This matches the webapp's own verifier
-(`internal/aitraffic/ingest.go`'s `verifySignature` / `projectSecret`)
-exactly, including the choice to use the secret's characters directly as
-the HMAC key rather than hex-decoding it first. `signBody()` is unit-tested
-against a signature independently computed by that Go code — see the test
-suite for the vector.
-
-## client_ip and bot verification
-
-`clientIp` is not just metadata: the server uses it to forward-confirm a
-crawler's user-agent claim by reverse DNS (the same check Google and Bing
-document for verifying their own crawlers), then hashes it and discards the
-raw address — it is never stored. A `Visit` sent without `clientIp` is
-recorded as unverified. `trackRequest()` fills this in automatically via
-`getClientIp()`; if you call `sendVisits()` directly, pass the real
-connecting IP for the request (not a value derived from a header a client
-could spoof outside a trusted proxy).
+`request` is anything with `{ url, headers.get(name) }` — a `NextRequest`, a
+WHATWG `Request`, or a Cloudflare Worker request all satisfy it, with no
+adapter and no peer dependency.
 
 ## Local development
 
