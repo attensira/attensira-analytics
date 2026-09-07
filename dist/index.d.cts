@@ -46,6 +46,13 @@ type ServerRequest = {
     headers: {
         get(name: string): string | null;
     };
+    /**
+     * Optional. When present, only GET and HEAD are reported: a POST is a form
+     * submission, not a page read, and no crawler fetches a page with one.
+     * Recording them puts `/api/subscribe` in the per-page breakdown next to
+     * real pages.
+     */
+    method?: string;
 };
 type TrackOptions = {
     /**

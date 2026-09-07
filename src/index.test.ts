@@ -206,6 +206,31 @@ test('every request is reported; the service decides what is a bot', async () =>
   assert.equal(JSON.parse(String(calls[0][1].body)).user_agent, chrome);
 });
 
+test('a form submission is not a page read', async () => {
+  const { impl, calls } = mockFetch();
+  const post = { ...makeRequest('https://attensira.com/api/waitlist'), method: 'POST' };
+  await trackPageHit('proj_test1234', post, { fetch: impl });
+  assert.equal(calls.length, 0);
+});
+
+test('GET and HEAD are both reported', async () => {
+  const { impl, calls } = mockFetch();
+  for (const method of ['GET', 'HEAD', 'get']) {
+    await trackPageHit(
+      'proj_test1234',
+      { ...makeRequest('https://attensira.com/'), method },
+      { fetch: impl }
+    );
+  }
+  assert.equal(calls.length, 3);
+});
+
+test('a request object with no method is still reported', async () => {
+  const { impl, calls } = mockFetch();
+  await trackPageHit('proj_test1234', makeRequest('https://attensira.com/'), { fetch: impl });
+  assert.equal(calls.length, 1);
+});
+
 test('an endpoint override is honoured for staging', async () => {
   const { impl, calls } = mockFetch();
   await trackPageHit('proj_test1234', makeRequest('https://x/'), {

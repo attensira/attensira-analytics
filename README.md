@@ -74,6 +74,24 @@ export default {
 };
 ```
 
+## Scope it to pages
+
+`trackPageHit` skips anything that is not a GET or HEAD, so form posts never
+land in your page breakdown. Paths are yours to scope, because only you know
+which of them are pages: if your middleware also runs for API routes, a
+webhook, or a rewrite that proxies another vendor, exclude those before
+calling — either in the framework's matcher, or with a guard:
+
+```ts
+const path = new URL(request.url).pathname;
+if (!path.startsWith('/api')) {
+  event.waitUntil(trackPageHit('YOUR_PROJECT_ID', request));
+}
+```
+
+Otherwise `/api/subscribe` appears in the per-page breakdown beside your real
+pages, which is the number the whole measurement exists to produce.
+
 ## Send everything — the service decides what is a bot
 
 Report every request, humans included. Classification happens server-side

@@ -49,6 +49,13 @@ export const SDK_VERSION = '@attensira/analytics/1.0.0';
 export type ServerRequest = {
   url: string;
   headers: { get(name: string): string | null };
+  /**
+   * Optional. When present, only GET and HEAD are reported: a POST is a form
+   * submission, not a page read, and no crawler fetches a page with one.
+   * Recording them puts `/api/subscribe` in the per-page breakdown next to
+   * real pages.
+   */
+  method?: string;
 };
 
 export type TrackOptions = {
@@ -250,6 +257,10 @@ export async function trackPageHit(
       console.error('[@attensira/analytics] a request is required for server-side tracking');
       return;
     }
+    // Not an error, so not logged: a middleware that runs on every request is
+    // expected to hand us writes it should not report.
+    const method = request.method?.toUpperCase();
+    if (method && method !== 'GET' && method !== 'HEAD') return;
 
     const body = JSON.stringify(await buildVisitBody(projectId, request));
     const headers: Record<string, string> = { 'content-type': 'application/json' };
