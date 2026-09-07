@@ -1,7 +1,7 @@
 {
   "name": "@attensira/analytics",
   "version": "1.0.0",
-  "description": "Signed edge/server client for Attensira AI-crawler traffic ingest (POST /v1/visits). Node/edge runtimes only — never bundle for the browser.",
+  "description": "Edge/server client for Attensira AI traffic ingest (POST /v1/visits). Node/edge runtimes only - AI crawlers do not execute JavaScript.",
   "license": "MIT",
   "files": [
     "dist"

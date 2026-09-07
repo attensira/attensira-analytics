@@ -1,283 +1,284 @@
 /**
- * @attensira/analytics — signed edge/server client for `POST /v1/visits`.
+ * @attensira/analytics — edge/server client for Attensira's AI traffic ingest.
  *
- * MIT-553: the package previously beaconed page hits from the browser to
- * `https://ingest.attensira.com/v1/crawler-logs`, a host the webapp never
- * served — nothing sent by that build was ever recorded. This is a rewrite
- * against the endpoint that actually exists: `attensira/webapp`'s
- * `POST /v1/visits` (see `src/internal/aitraffic/ingest.go`), HMAC-signed
- * and edge-only.
+ * ## Why this package is not a browser script
  *
- * Why this cannot be a browser SDK: the endpoint is authenticated by an
- * HMAC over the request body, keyed by a per-project signing secret. A
- * secret shipped to a browser bundle is a secret anyone viewing page
- * source can read, which defeats the signature entirely — the whole reason
- * `/v1/visits` uses a signature instead of a bearer key is that its caller
- * (a CDN worker on the customer's own domain) has nowhere safe to keep one.
- * AI crawlers don't execute JavaScript either way, so a browser beacon
- * never saw them regardless of the signing question. This package now only
- * runs where the secret can stay a secret: an edge worker, Next.js
- * middleware, or any other server-side runtime with `fetch` and
+ * AI crawlers do not execute JavaScript. GPTBot, ClaudeBot, PerplexityBot and
+ * CCBot fetch a page and leave; by the time any in-page script runs, the only
+ * visitors left are humans with browsers. Versions before 1.0.0 were a
+ * `sendBeacon` from the browser, so they measured every visitor *except* the
+ * ones this product exists to count — and sent them to `/v1/crawler-logs`,
+ * a route the ingest service no longer serves. Nothing a pre-1.0 install sent
+ * was ever recorded.
+ *
+ * 1.0.0 is a rewrite against `POST /v1/visits` on the ingest service, called
+ * from the one layer where a crawler request exists to be seen: edge
+ * middleware, a CDN worker, or any server-side runtime with `fetch` and
  * `crypto.subtle`.
  *
- * Get `projectId` and `signingSecret` from `GET /v1/visits/install` on your
- * workspace's API key. `signingSecret` there is the project-derived secret
- * (`signing_secret` in that response) — not your API key, and not the
- * webapp's root `AI_TRAFFIC_SIGNING_KEY`, which never leaves the server.
+ * ## The whole install
+ *
+ * ```ts
+ * trackPageHit(projectId, request);
+ * ```
+ *
+ * A project id is all that is required. Signing is an additional defence that
+ * turns on by itself once a write key is provisioned for the project — see
+ * `options.writeKey`.
+ *
+ * ## What it deliberately does not do
+ *
+ * It does not decide what is a bot. Every request handed to it is reported,
+ * humans included, and the ingest service classifies the user agent against a
+ * table it can correct without anyone redeploying an edge worker. A client
+ * that filtered first would be a second, stale copy of that table, and the
+ * crawler it had not heard of would be the one that went unrecorded.
  */
 
-const DEFAULT_ENDPOINT = 'https://api.attensira.com/v1/visits';
-const SIGNATURE_HEADER = 'X-Attensira-Signature';
+/** `POST /v1/visits` on the ingest service. */
+const DEFAULT_ENDPOINT = 'https://ingest.attensira.com/v1/visits';
 
-function assertServerSide(): void {
-  if (typeof window !== 'undefined') {
-    throw new Error(
-      '[@attensira/analytics] refusing to run in a browser: this package signs ' +
-        'every request with your project signing secret, and a secret reachable ' +
-        'from client-side JavaScript is a secret anyone viewing page source can ' +
-        'read. Call it from edge middleware or a server route instead — see the ' +
-        'README for Cloudflare Workers / Next.js middleware examples.'
-    );
-  }
-}
+/** Sent as `sdk_version` so ingest can attribute a malformed payload. */
+export const SDK_VERSION = '@attensira/analytics/1.0.0';
 
-// -- public types -----------------------------------------------------------
-
-/** One page hit as this client saw it. Mirrors `IngestVisit` in the webapp. */
-export type Visit = {
-  /** Defaults to `new Date()` if omitted. */
-  timestamp?: Date;
-  pageUrl: string;
-  userAgent?: string;
-  referrer?: string;
-  /**
-   * The crawler's real connecting IP (not the visitor's — this route exists
-   * for AI-crawler traffic). Used server-side to verify the user-agent's
-   * claim by reverse DNS, then hashed and discarded; the raw address is
-   * never stored. Omit only if truly unavailable — without it every hit
-   * reports unverified.
-   */
-  clientIp?: string;
+/**
+ * The subset of an inbound request this client reads. Structural on purpose:
+ * a Next.js `NextRequest`, a WHATWG `Request` and a Cloudflare Worker request
+ * all satisfy it without an adapter or a peer dependency.
+ */
+export type ServerRequest = {
+  url: string;
+  headers: { get(name: string): string | null };
 };
 
-/** Mirrors `IngestResult` in the webapp, camelCased. */
-export type IngestResult = {
-  accepted: number;
-  /** Malformed hits (no page URL, timestamp outside the retention window). */
-  rejected: number;
-  /** Hits past the project's daily cap. Never billed. */
-  dropped: number;
-  capReached: boolean;
-};
-
-export type AttensiraClientOptions = {
-  /** Your project's id, as shown alongside the signing secret in `GET /v1/visits/install`. */
-  projectId: string;
+export type TrackOptions = {
   /**
-   * The per-project signing secret from `GET /v1/visits/install`'s
-   * `signing_secret` field. Treat it like any other server-side credential:
-   * environment variable, never committed, never sent to a client.
+   * The project's HMAC write key. Optional: a project with no key provisioned
+   * is accepted unsigned, which is what makes a project id alone a working
+   * install. Once ingest has a key for the project the unsigned path closes —
+   * an unsigned body is then a forgery, not an old client — so this must be
+   * set wherever that project reports from.
+   *
+   * Defaults to `ATTENSIRA_WRITE_KEY` where `process.env` exists. It is a
+   * server-side credential: never ship it to a browser bundle.
    */
-  signingSecret: string;
-  /** Override for staging/self-hosted setups. Defaults to the production ingest endpoint. */
+  writeKey?: string;
+  /** Override for staging or self-hosted ingest. Defaults to `ATTENSIRA_INGEST_ENDPOINT`, then production. */
   endpoint?: string;
   /** Injection point for tests; defaults to the global `fetch`. */
   fetch?: typeof fetch;
 };
 
-// -- signing ------------------------------------------------------------------
+/** The body of `POST /v1/visits`. Flat, exactly as the service declares it. */
+export type VisitBody = {
+  project_id: string;
+  sdk_version: string;
+  page_url: string;
+  user_agent?: string;
+  referrer?: string;
+  client_ip_hash?: string;
+};
+
+function readEnv(name: string): string | undefined {
+  return typeof process !== 'undefined' ? process.env?.[name] : undefined;
+}
 
 function toHex(buffer: ArrayBuffer): string {
   return [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * Builds the `X-Attensira-Signature` header value: `t=<unix seconds>,v1=<hex
- * hmac-sha256>`, where the signed message is the literal bytes
- * `"<t>.<body>"` and the key is the project's signing secret used as UTF-8
- * bytes (not hex-decoded).
- *
- * This mirrors `verifySignature` / `projectSecret` in
- * `webapp/src/internal/aitraffic/ingest.go` byte-for-byte: same algorithm
- * (HMAC-SHA256), same encoding (lowercase hex), same signed-string
- * construction (`strconv.FormatInt(t, 10) + "."` followed by the raw body
- * bytes — equivalent to `` `${t}.${body}` `` since HMAC's streaming Write
- * calls are associative), and the same key material (the secret's raw
- * characters, exactly as `crypto.subtle.importKey('raw', ...)` is used in
- * the webapp's own generated worker snippet). See `index.test.ts` for a
- * test vector generated by re-running the Go implementation directly and
- * asserting byte-identical output here.
- */
-export async function signBody(
-  signingSecret: string,
-  timestampSeconds: number,
-  body: string
-): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(signingSecret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const mac = await crypto.subtle.sign(
-    'HMAC',
-    key,
-    new TextEncoder().encode(`${timestampSeconds}.${body}`)
-  );
-  return `t=${timestampSeconds},v1=${toHex(mac)}`;
-}
-
-// -- client -------------------------------------------------------------------
-
-function serializeVisit(visit: Visit): Record<string, string> {
-  return {
-    timestamp: (visit.timestamp ?? new Date()).toISOString(),
-    page_url: visit.pageUrl,
-    user_agent: visit.userAgent ?? '',
-    referrer: visit.referrer ?? '',
-    client_ip: visit.clientIp ?? '',
-  };
-}
-
-function parseIngestResult(raw: unknown): IngestResult {
-  const r = (raw ?? {}) as Record<string, unknown>;
-  return {
-    accepted: typeof r.accepted === 'number' ? r.accepted : 0,
-    rejected: typeof r.rejected === 'number' ? r.rejected : 0,
-    dropped: typeof r.dropped === 'number' ? r.dropped : 0,
-    capReached: r.cap_reached === true,
-  };
+async function sha256Hex(input: string): Promise<string> {
+  return toHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)));
 }
 
 /**
- * Header names commonly used to forward the real client IP through a proxy
- * or edge platform, checked in this order. `x-forwarded-for` may contain a
- * comma-separated chain; only the first (closest-to-client) hop is used.
+ * Header names platforms use to forward the real client address, in the order
+ * they are trusted. `x-forwarded-for` may be a chain; only the first hop is
+ * read.
  */
 const CLIENT_IP_HEADERS = ['cf-connecting-ip', 'true-client-ip', 'x-real-ip'] as const;
 
-/**
- * Best-effort extraction of the real connecting IP from a `Headers` object,
- * for platforms that don't already give you the raw socket address.
- */
-export function getClientIp(headers: Headers): string {
+/** Best-effort real client address from an inbound request's headers. */
+export function getClientIp(headers: { get(name: string): string | null }): string {
   for (const name of CLIENT_IP_HEADERS) {
     const value = headers.get(name);
     if (value) return value.trim();
   }
   const forwardedFor = headers.get('x-forwarded-for');
-  if (forwardedFor) {
-    const first = forwardedFor.split(',')[0]?.trim();
-    if (first) return first;
-  }
-  return '';
-}
-
-export class AttensiraClient {
-  private readonly projectId: string;
-  private readonly signingSecret: string;
-  private readonly endpoint: string;
-  private readonly fetchImpl: typeof fetch;
-
-  constructor(options: AttensiraClientOptions) {
-    assertServerSide();
-    if (!options.projectId) {
-      throw new Error('[@attensira/analytics] projectId is required');
-    }
-    if (!options.signingSecret) {
-      throw new Error('[@attensira/analytics] signingSecret is required');
-    }
-    this.projectId = options.projectId;
-    this.signingSecret = options.signingSecret;
-    this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
-    this.fetchImpl = options.fetch ?? fetch;
-  }
-
-  /**
-   * Signs and sends one batch (up to the webapp's 500-per-request limit;
-   * this client does not chunk for you). Resolves with the server's
-   * per-hit accounting, or rejects on a network error or a non-2xx
-   * response — this never fails silently.
-   */
-  async sendVisits(visits: Visit | Visit[]): Promise<IngestResult> {
-    const list = Array.isArray(visits) ? visits : [visits];
-    if (list.length === 0) {
-      throw new Error('[@attensira/analytics] sendVisits requires at least one visit');
-    }
-
-    const body = JSON.stringify({
-      project_id: this.projectId,
-      visits: list.map(serializeVisit),
-    });
-    const timestampSeconds = Math.floor(Date.now() / 1000);
-    const signature = await signBody(this.signingSecret, timestampSeconds, body);
-
-    const response = await this.fetchImpl(this.endpoint, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        [SIGNATURE_HEADER]: signature,
-      },
-      body,
-    });
-
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(
-        `[@attensira/analytics] ingest request failed: ${response.status} ${response.statusText} — ${text}`
-      );
-    }
-    return parseIngestResult(text ? JSON.parse(text) : {});
-  }
-
-  /**
-   * Convenience for the common case: build a `Visit` from an inbound
-   * `Request` (page URL, user agent, referrer, and best-effort client IP)
-   * and send it. Errors are logged, not thrown — a tracking failure must
-   * never break the request it's attached to. Call this fire-and-forget
-   * (in a Cloudflare Worker, wrap it in `ctx.waitUntil(...)`); await it
-   * yourself if you need to know it landed.
-   */
-  async trackRequest(
-    request: Request,
-    extra: Partial<Visit> = {}
-  ): Promise<IngestResult | undefined> {
-    try {
-      return await this.sendVisits({
-        pageUrl: request.url,
-        userAgent: request.headers.get('user-agent') ?? '',
-        referrer: request.headers.get('referer') ?? '',
-        clientIp: getClientIp(request.headers),
-        ...extra,
-      });
-    } catch (error) {
-      console.error('[@attensira/analytics] failed to send page hit:', error);
-      return undefined;
-    }
-  }
+  return forwardedFor?.split(',')[0]?.trim() ?? '';
 }
 
 /**
- * Creates a reusable client. Omit `options` to read `ATTENSIRA_PROJECT_ID`,
- * `ATTENSIRA_SIGNING_SECRET`, and (optionally) `ATTENSIRA_INGEST_ENDPOINT`
- * from `process.env`, for runtimes where that's available.
+ * Hashes a client address for `client_ip_hash`.
+ *
+ * The raw address never leaves the caller's own infrastructure: it is not in
+ * the request body, so it reaches neither our logs nor anything between. The
+ * service re-hashes this digest with a salt that rotates daily, so a stored
+ * value is not a stable identifier either — but that rotation cannot undo an
+ * address we were sent, which is why the hashing happens here.
+ *
+ * Salted with the project id so one visitor's digest cannot be matched across
+ * projects.
  */
-export function createClient(options?: AttensiraClientOptions): AttensiraClient {
-  if (options) return new AttensiraClient(options);
-
-  const env = typeof process !== 'undefined' ? process.env : undefined;
-  const projectId = env?.ATTENSIRA_PROJECT_ID;
-  const signingSecret = env?.ATTENSIRA_SIGNING_SECRET;
-  if (!projectId || !signingSecret) {
-    throw new Error(
-      '[@attensira/analytics] createClient() without options requires ' +
-        'ATTENSIRA_PROJECT_ID and ATTENSIRA_SIGNING_SECRET in the environment'
-    );
-  }
-  return new AttensiraClient({
-    projectId,
-    signingSecret,
-    endpoint: env?.ATTENSIRA_INGEST_ENDPOINT,
-  });
+export function hashClientIp(projectId: string, ip: string): Promise<string> {
+  return sha256Hex(`${projectId}:${ip}`);
 }
+
+/**
+ * The `x-attensira-signature` value: lowercase hex HMAC-SHA256 over the bytes
+ * `"<timestamp>.<body>"`, keyed by the write key's own characters.
+ *
+ * This mirrors `VerifyRequestSignature` in the ingest service byte for byte —
+ * same algorithm, same encoding, and the same signed-string construction (Go
+ * writes `timestamp + "."` and then the raw body into one HMAC, which is the
+ * same stream as `` `${t}.${body}` ``). The timestamp travels in its own
+ * `x-attensira-timestamp` header but is signed too, so it cannot be moved
+ * forward to replay a captured body; ingest rejects one more than five
+ * minutes from its clock.
+ */
+export async function signBody(
+  writeKey: string,
+  timestampSeconds: number,
+  body: string
+): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(writeKey),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  return toHex(
+    await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${timestampSeconds}.${body}`))
+  );
+}
+
+/**
+ * The public URL of the page that was read.
+ *
+ * `request.url` is the public URL on Vercel and Cloudflare, but behind a proxy
+ * that terminates TLS and forwards to an internal origin it is the internal
+ * one — so every row would record `http://localhost:3000/...` and the per-page
+ * breakdown, which is the whole point of the measurement, would be unusable.
+ * The forwarded headers win where the platform sets them.
+ */
+export function publicPageUrl(request: ServerRequest): string {
+  let url: URL;
+  try {
+    url = new URL(request.url);
+  } catch {
+    // A relative or malformed url is still worth reporting as-is: the service
+    // normalises what it can, and a dropped hit teaches us nothing.
+    return request.url;
+  }
+
+  const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
+  if (forwardedHost) {
+    url.host = forwardedHost;
+    // Assigning a bare hostname leaves any existing port in place, per the URL
+    // spec, so a proxy fronting `localhost:3000` would otherwise record
+    // `https://example.com:3000/...` — a different string from the real URL,
+    // splitting one page into two rows.
+    if (!forwardedHost.includes(':')) url.port = '';
+  }
+
+  const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  if (forwardedProto) url.protocol = `${forwardedProto}:`;
+
+  return url.toString();
+}
+
+/** Builds the request body for one page hit. Exported for tests and workers. */
+export async function buildVisitBody(
+  projectId: string,
+  request: ServerRequest
+): Promise<VisitBody> {
+  const body: VisitBody = {
+    project_id: projectId,
+    sdk_version: SDK_VERSION,
+    page_url: publicPageUrl(request),
+  };
+
+  const userAgent = request.headers.get('user-agent');
+  if (userAgent) body.user_agent = userAgent;
+
+  const referrer = request.headers.get('referer') ?? request.headers.get('referrer');
+  if (referrer) body.referrer = referrer;
+
+  const ip = getClientIp(request.headers);
+  if (ip) body.client_ip_hash = await hashClientIp(projectId, ip);
+
+  return body;
+}
+
+/**
+ * Reports one page hit.
+ *
+ * Never throws and never rejects: a tracking failure must not break the
+ * request it is attached to. Call it fire-and-forget, handing the promise to
+ * whatever keeps work alive past the response — `event.waitUntil(...)` in
+ * Next.js middleware, `ctx.waitUntil(...)` in a Cloudflare Worker. Without
+ * that the runtime may recycle the invocation the moment the response is
+ * returned, cancelling the report mid-flight.
+ *
+ * ```ts
+ * event.waitUntil(trackPageHit('YOUR_PROJECT_ID', request));
+ * ```
+ */
+export async function trackPageHit(
+  projectId: string | null | undefined,
+  request: ServerRequest,
+  options: TrackOptions = {}
+): Promise<void> {
+  try {
+    if (!projectId) {
+      console.error('[@attensira/analytics] projectId is required');
+      return;
+    }
+    if (typeof window !== 'undefined') {
+      // Not a silent return: calling this in the browser is the exact mistake
+      // that made pre-1.0 installs report zero crawlers, and it has to be
+      // loud enough to notice before it ships.
+      console.error(
+        '[@attensira/analytics] refusing to run in the browser: AI crawlers do not ' +
+          'execute JavaScript, so an in-page call reports humans only. Call this from ' +
+          'edge middleware or a server route instead.'
+      );
+      return;
+    }
+    if (!request) {
+      console.error('[@attensira/analytics] a request is required for server-side tracking');
+      return;
+    }
+
+    const body = JSON.stringify(await buildVisitBody(projectId, request));
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+
+    const writeKey = options.writeKey ?? readEnv('ATTENSIRA_WRITE_KEY');
+    if (writeKey) {
+      const timestamp = Math.floor(Date.now() / 1000);
+      headers['x-attensira-timestamp'] = String(timestamp);
+      headers['x-attensira-signature'] = await signBody(writeKey, timestamp, body);
+    }
+
+    const send = options.fetch ?? fetch;
+    const response = await send(
+      options.endpoint ?? readEnv('ATTENSIRA_INGEST_ENDPOINT') ?? DEFAULT_ENDPOINT,
+      { method: 'POST', headers, body }
+    );
+
+    // A 4xx is a wiring mistake — wrong project id, wrong key, a schema that
+    // moved — and it will not fix itself, so it is worth saying out loud. 429
+    // and 5xx are ingest shedding load or having a bad minute; staying quiet
+    // there keeps a transient outage out of the logs.
+    if (!response.ok && response.status < 500 && response.status !== 429) {
+      console.error(
+        `[@attensira/analytics] visit rejected: ${response.status} ${response.statusText}`
+      );
+    }
+  } catch (error) {
+    console.error('[@attensira/analytics] failed to send page hit:', error);
+  }
+}
+
+export default trackPageHit;
