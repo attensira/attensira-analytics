@@ -1,0 +1,58 @@
+name: Release
+
+# Publishes to npm when the version in package.json is not on the registry yet.
+# To release: bump the version in a PR (npm version patch|minor|major), merge it.
+# Every other merge to main is a no-op for npm. Run it by hand from the
+# Actions tab to publish the current version of main without a new commit.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # manual release: Actions tab > Release > Run workflow
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # tag + GitHub release
+  id-token: write # npm provenance
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      - name: Is this version already published?
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$NAME@$VERSION is already on npm, nothing to do."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.check.outputs.published == 'false'
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag and GitHub release
+        if: steps.check.outputs.published == 'false'
+        run: gh release create "v${{ steps.check.outputs.version }}" --title "v${{ steps.check.outputs.version }}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
