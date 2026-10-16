@@ -3,6 +3,14 @@
   "version": "1.0.0",
   "description": "Edge/server client for Attensira AI traffic ingest (POST /v1/visits). Node/edge runtimes only - AI crawlers do not execute JavaScript.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/attensira/attensira-analytics.git"
+  },
+  "homepage": "https://github.com/attensira/attensira-analytics#readme",
+  "bugs": {
+    "url": "https://github.com/attensira/attensira-analytics/issues"
+  },
   "files": [
     "dist"
   ],
